@@ -30,7 +30,7 @@ The Chrome Tab Switcher is a browser extension that enables Windows Alt+Tab-styl
 2. THE Extension SHALL declare permissions for "tabs", "storage", and "activeTab"
 3. THE Extension SHALL register background.js as a service worker
 4. THE Extension SHALL register content.js as a content script on all URLs with document_end timing
-5. THE Extension SHALL define a command "open-switcher" with suggested key Alt+Y
+5. THE Extension SHALL define a command "open-switcher" with suggested key Alt+X
 6. THE Extension SHALL define a command "quick-switch" with suggested key Alt+W
 7. THE Extension SHALL include icon files at sizes 16x16, 48x48, and 128x128 pixels
 
@@ -79,10 +79,10 @@ The Chrome Tab Switcher is a browser extension that enables Windows Alt+Tab-styl
 #### Acceptance Criteria
 
 1. FOR ALL tabs in the Tab_Stack, THE Content_Script SHALL render a Tab_Card
-2. THE Tab_Card SHALL display the tab favicon at 16x16 pixels
+2. THE Tab_Card SHALL display a built-in local icon at 16x16 pixels
 3. THE Tab_Card SHALL display the tab title truncated to 40 characters
 4. THE Tab_Card SHALL display the tab domain
-5. WHEN a tab has no favicon, THE Tab_Card SHALL display a default icon
+5. THE Tab_Card SHALL NOT load or embed remote favicon URLs
 6. THE Tab_Card SHALL render tabs in Recency_Order with most recent first
 7. THE Content_Script SHALL highlight the second Tab_Card by default
 
@@ -92,13 +92,13 @@ The Chrome Tab Switcher is a browser extension that enables Windows Alt+Tab-styl
 
 #### Acceptance Criteria
 
-1. WHEN the overlay shortcut is pressed while the Overlay is open, THE Content_Script SHALL move the Active_Highlight to the next Tab_Card
-2. WHEN the overlay shortcut is pressed with Shift while the Overlay is open, THE Content_Script SHALL move the Active_Highlight to the previous Tab_Card
+1. WHEN Tab or ArrowDown is pressed while the Overlay is open, THE Content_Script SHALL move the Active_Highlight to the next Tab_Card
+2. WHEN Shift+Tab or ArrowUp is pressed while the Overlay is open, THE Content_Script SHALL move the Active_Highlight to the previous Tab_Card
 3. WHEN the Active_Highlight reaches the last Tab_Card and moves next, THE Content_Script SHALL wrap to the first Tab_Card
 4. WHEN the Active_Highlight reaches the first Tab_Card and moves previous, THE Content_Script SHALL wrap to the last Tab_Card
 5. WHEN Enter is pressed while the Overlay is open, THE Content_Script SHALL switch to the highlighted tab
 6. WHEN Escape is pressed while the Overlay is open, THE Content_Script SHALL close the Overlay without switching tabs
-7. WHEN the overlay shortcut is released, THE Content_Script SHALL switch to the highlighted tab and close the Overlay
+7. WHEN the Overlay is open, THE Content_Script SHALL NOT require modifier-key (Alt/Shift) state to navigate or switch
 
 ### Requirement 7: Tab Switching Execution
 
@@ -118,7 +118,7 @@ The Chrome Tab Switcher is a browser extension that enables Windows Alt+Tab-styl
 #### Acceptance Criteria
 
 1. WHEN the Content_Script requests the Tab_Stack, THE Background_Service SHALL query Chrome for current tab metadata
-2. FOR ALL tabs in the Tab_Stack, THE Background_Service SHALL retrieve the tab title, favicon URL, and page URL
+2. FOR ALL tabs in the Tab_Stack, THE Background_Service SHALL retrieve the tab title and page URL
 3. WHEN a tab no longer exists, THE Background_Service SHALL remove it from the Tab_Stack before responding
 4. THE Background_Service SHALL respond with tab metadata within 200 milliseconds
 5. THE Background_Service SHALL extract the domain from each tab URL for display purposes
@@ -147,7 +147,7 @@ The Chrome Tab Switcher is a browser extension that enables Windows Alt+Tab-styl
 3. WHEN a tab is closed while the Overlay is open, THE Content_Script SHALL re-fetch the Tab_Stack and re-render the Overlay
 4. WHEN the "open-switcher" command is triggered on a chrome:// page, THE Extension SHALL fail silently without errors
 5. WHEN the user holds the overlay shortcut key, THE Content_Script SHALL debounce navigation events to prevent rapid cycling
-6. WHEN multiple Chrome windows are open, THE Background_Service SHALL maintain a separate Tab_Stack for each window using chrome.windows.getCurrent
+6. WHEN multiple Chrome windows are open, THE Background_Service SHALL maintain a separate Tab_Stack for each window using windowId from Chrome tab/window events and from the active tab context for commands and messages
 
 ### Requirement 11: Resource Loading and Security
 

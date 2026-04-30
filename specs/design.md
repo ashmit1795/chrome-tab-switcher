@@ -31,7 +31,7 @@ graph TB
     Storage[(chrome.storage.session<br/>Tab Stack)]
     ChromeAPI[Chrome APIs<br/>tabs, commands, storage]
     
-    User -->|Alt+Y / Alt+W| Manifest
+    User -->|Alt+X / Alt+W| Manifest
     Manifest -->|commands.onCommand| Background
     Background <-->|read/write| Storage
     Background <-->|chrome.tabs API| ChromeAPI
@@ -75,17 +75,18 @@ sequenceDiagram
     participant Storage
     participant DOM
     
-    User->>Chrome: Press Alt+Y
+    User->>Chrome: Press Alt+X
     Chrome->>Background: commands.onCommand("open-switcher")
     Background->>Content: sendMessage({type: "OPEN_OVERLAY"})
+    Content->>Background: sendMessage({type: "OVERLAY_OPENED"})
     Content->>Background: sendMessage({type: "GET_TAB_STACK"})
     Background->>Storage: Read tab stack
     Storage-->>Background: [tab1, tab2, ...]
     Background->>Chrome: chrome.tabs.query() for metadata
-    Chrome-->>Background: Tab details (title, favicon, url)
+    Chrome-->>Background: Tab details (title, url)
     Background-->>Content: Tab stack with metadata
     Content->>DOM: Inject overlay element
-    User->>Content: Navigate with Alt+Y / Enter
+    User->>Content: Navigate with Arrow keys / Tab / Enter
     Content->>Background: sendMessage({type: "SWITCH_TO_TAB", tabId})
     Background->>Chrome: chrome.tabs.update(tabId, {active: true})
     Content->>DOM: Remove overlay element
@@ -127,7 +128,7 @@ sequenceDiagram
   "commands": {
     "open-switcher": {
       "suggested_key": {
-        "default": "Alt+Y"
+        "default": "Alt+X"
       },
       "description": "Open tab switcher overlay"
     },
@@ -152,7 +153,7 @@ sequenceDiagram
 - **`<all_urls>` match pattern**: Content script must be available on all pages to display overlay
 - **`document_end` timing**: Ensures DOM is ready before content script executes
 - **`all_frames: false`**: Only inject into top-level frames to avoid duplicate overlays in iframes
-- **Alt+Y and Alt+W shortcuts**: Non-conflicting alternatives since Alt+Tab is reserved by the OS
+- **Alt+X and Alt+W shortcuts**: Non-conflicting alternatives since Alt+Tab is reserved by the OS
 
 ### 2. Background Service Worker (background.js)
 
@@ -164,12 +165,17 @@ sequenceDiagram
 - Handle quick-switch and open-switcher commands
 - Provide tab metadata to content scripts
 - Execute tab switching operations
+- Track which window currently has the overlay open (to push TAB_STACK_UPDATED)
 
 **State Management**:
 ```javascript
 // In-memory cache (rebuilt on service worker restart)
 // Map of windowId -> array of tab IDs (most recent first)
 let tabStacksByWindow = new Map(); // Map<number, number[]>
+
+// Track where the overlay is currently open
+// Map of windowId -> tabId that hosts the overlay
+let overlayHostTabByWindow = new Map(); // Map<number, number>
 
 // Session storage key
 const STORAGE_KEY = 'tabStacksByWindow';
@@ -182,8 +188,8 @@ const STORAGE_KEY = 'tabStacksByWindow';
 | `initializeTabStacks()` | Restore per-window tab stacks from session storage on startup | Service worker activation |
 | `updateTabStack(tabId, windowId)` | Add/move tab to front of window's stack, remove duplicates | `chrome.tabs.onActivated` |
 | `persistTabStacks()` | Write all window tab stacks to session storage | After stack modifications |
-| `handleQuickSwitch()` | Activate second tab in current window's stack | `commands.onCommand("quick-switch")` |
-| `handleOpenSwitcher()` | Send OPEN_OVERLAY message to active tab | `commands.onCommand("open-switcher")` |
+| `handleQuickSwitch(commandTab)` | Activate second tab in the command tab's window stack | `commands.onCommand("quick-switch")` |
+| `handleOpenSwitcher(commandTab)` | Send OPEN_OVERLAY message to the command tab | `commands.onCommand("open-switcher")` |
 | `getTabStackWithMetadata(windowId)` | Query Chrome for tab details in specific window and return enriched stack | Message from content script |
 | `switchToTab(tabId)` | Activate specified tab | Message from content script |
 | `removeClosedTab(tabId, windowId)` | Remove tab from window's stack when closed | `chrome.tabs.onRemoved` |
@@ -193,7 +199,9 @@ const STORAGE_KEY = 'tabStacksByWindow';
 ```typescript
 // From content script
 type ContentMessage = 
-  | { type: "GET_TAB_STACK", windowId: number }
+  | { type: "OVERLAY_OPENED" }
+  | { type: "OVERLAY_CLOSED" }
+  | { type: "GET_TAB_STACK" }
   | { type: "SWITCH_TO_TAB", tabId: number };
 ```
 
@@ -202,6 +210,7 @@ type ContentMessage =
 // To content script
 type BackgroundMessage = 
   | { type: "OPEN_OVERLAY" }
+  | { type: "TAB_STACK_UPDATED" }
   | { 
       type: "TAB_STACK_RESPONSE", 
       tabs: Array<{
@@ -209,7 +218,6 @@ type BackgroundMessage =
         title: string,
         url: string,
         domain: string,
-        favIconUrl: string
       }>
     };
 ```
@@ -220,7 +228,7 @@ type BackgroundMessage =
 - `chrome.tabs.query()` - Retrieve tab metadata
 - `chrome.tabs.update()` - Activate tabs
 - `chrome.windows.onRemoved` - Clean up closed windows
-- `chrome.windows.getCurrent()` - Get current window ID
+- `chrome.windows.getLastFocused()` - Optional fallback to identify a window when a command does not provide a tab
 - `chrome.storage.session.get/set()` - Persist tab stacks
 - `chrome.commands.onCommand` - Handle keyboard shortcuts
 - `chrome.runtime.sendMessage()` - Send messages to content scripts
@@ -271,8 +279,7 @@ function extractDomain(url) {
 - Listen for OPEN_OVERLAY messages from background
 - Request tab stack with metadata
 - Inject overlay DOM element
-- Handle keyboard navigation (Alt+Y, Shift+Alt+Y, Enter, Escape)
-- Detect key release to trigger switch
+- Handle keyboard navigation (Tab/Shift+Tab, ArrowUp/ArrowDown, Enter, Escape)
 - Send switch requests to background
 - Remove overlay from DOM
 
@@ -283,7 +290,6 @@ let overlayElement = null;
 let tabList = [];
 let selectedIndex = 1; // Default to second tab (previous tab)
 let isOverlayOpen = false;
-let keyHeldDown = false;
 ```
 
 **Key Functions**:
@@ -291,33 +297,29 @@ let keyHeldDown = false;
 | Function | Purpose | Triggers |
 |----------|---------|----------|
 | `handleOpenOverlay()` | Request tab stack and inject overlay | Message from background |
-| `requestTabStack()` | Send GET_TAB_STACK message to background with current window ID | After receiving OPEN_OVERLAY |
+| `requestTabStack()` | Send GET_TAB_STACK message to background | After receiving OPEN_OVERLAY |
 | `injectOverlay(tabs)` | Create and insert overlay DOM element | Receiving tab stack response |
 | `renderTabCards(tabs)` | Generate HTML for tab cards | During overlay injection |
 | `handleKeyDown(event)` | Process navigation keys while overlay open | `document.keydown` event |
-| `handleKeyUp(event)` | Detect Alt key release to trigger switch | `document.keyup` event |
-| `switchToSelectedTab()` | Send SWITCH_TO_TAB message and close overlay | Enter key or Alt release |
+| `switchToSelectedTab()` | Send SWITCH_TO_TAB message and close overlay | Enter key |
 | `closeOverlay()` | Remove overlay from DOM and reset state | Escape key or after switch |
-| `moveSelection(direction)` | Update selectedIndex with wrapping | Alt+Y navigation |
-| `getCurrentWindowId()` | Get current window ID using chrome.windows.getCurrent | Before requesting tab stack |
+| `moveSelection(direction)` | Update selectedIndex with wrapping | Keyboard navigation |
 
 **Keyboard Event Handling**:
 ```javascript
 function handleKeyDown(event) {
   if (!isOverlayOpen) return;
-  
-  // Alt+Y: Move to next tab
-  if (event.altKey && event.key === 'y' && !event.shiftKey) {
+
+  // Next
+  if ((event.key === 'Tab' && !event.shiftKey) || event.key === 'ArrowDown') {
     event.preventDefault();
     moveSelection(1);
-    keyHeldDown = true;
   }
-  
-  // Shift+Alt+Y: Move to previous tab
-  if (event.altKey && event.shiftKey && event.key === 'Y') {
+
+  // Previous
+  if ((event.key === 'Tab' && event.shiftKey) || event.key === 'ArrowUp') {
     event.preventDefault();
     moveSelection(-1);
-    keyHeldDown = true;
   }
   
   // Enter: Switch to selected tab
@@ -330,15 +332,6 @@ function handleKeyDown(event) {
   if (event.key === 'Escape') {
     event.preventDefault();
     closeOverlay();
-  }
-}
-
-function handleKeyUp(event) {
-  if (!isOverlayOpen) return;
-  
-  // Alt key released: switch to selected tab
-  if (event.key === 'Alt' && keyHeldDown) {
-    switchToSelectedTab();
   }
 }
 ```
@@ -356,6 +349,7 @@ function moveSelection(direction) {
 // From background
 type BackgroundMessage = 
   | { type: "OPEN_OVERLAY" }
+  | { type: "TAB_STACK_UPDATED" }
   | { 
       type: "TAB_STACK_RESPONSE", 
       tabs: Array<TabMetadata>
@@ -366,7 +360,9 @@ type BackgroundMessage =
 ```typescript
 // To background
 type ContentMessage = 
-  | { type: "GET_TAB_STACK", windowId: number }
+  | { type: "OVERLAY_OPENED" }
+  | { type: "OVERLAY_CLOSED" }
+  | { type: "GET_TAB_STACK" }
   | { type: "SWITCH_TO_TAB", tabId: number };
 ```
 
@@ -473,7 +469,6 @@ interface TabMetadata {
   title: string;        // Page title (truncated to 40 chars for display)
   url: string;          // Full URL
   domain: string;       // Extracted hostname
-  favIconUrl: string;   // Favicon URL (may be empty)
 }
 ```
 
@@ -497,8 +492,7 @@ async function getTabStackWithMetadata(windowId) {
         id: tab.id,
         title: tab.title || 'Untitled',
         url: tab.url || '',
-        domain: extractDomain(tab.url || ''),
-        favIconUrl: tab.favIconUrl || ''
+        domain: extractDomain(tab.url || '')
       };
     });
   
@@ -516,6 +510,7 @@ async function getTabStackWithMetadata(windowId) {
 ```typescript
 type BackgroundToContentMessage = 
   | { type: "OPEN_OVERLAY" }
+  | { type: "TAB_STACK_UPDATED" }
   | { 
       type: "TAB_STACK_RESPONSE", 
       tabs: TabMetadata[]
@@ -525,7 +520,9 @@ type BackgroundToContentMessage =
 **Content → Background**:
 ```typescript
 type ContentToBackgroundMessage = 
-  | { type: "GET_TAB_STACK", windowId: number }
+  | { type: "OVERLAY_OPENED" }
+  | { type: "OVERLAY_CLOSED" }
+  | { type: "GET_TAB_STACK" }
   | { 
       type: "SWITCH_TO_TAB", 
       tabId: number 
@@ -537,7 +534,13 @@ type ContentToBackgroundMessage =
 // Background service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_TAB_STACK") {
-    getTabStackWithMetadata(message.windowId).then(tabs => {
+    const windowId = sender?.tab?.windowId;
+    if (typeof windowId !== 'number') {
+      sendResponse({ type: "TAB_STACK_RESPONSE", tabs: [] });
+      return;
+    }
+
+    getTabStackWithMetadata(windowId).then(tabs => {
       sendResponse({ type: "TAB_STACK_RESPONSE", tabs });
     });
     return true; // Async response
@@ -647,7 +650,7 @@ async function requestTabStack() {
 ### Edge Cases
 
 **Multiple Windows**:
-- Tab stack is per-window using chrome.windows.getCurrent()
+- Tab stack is per-window keyed by windowId
 - Each window maintains its own independent stack
 - Switching activates tab in the current window only
 - Window closure automatically cleans up that window's stack
@@ -664,8 +667,8 @@ async function requestTabStack() {
 
 **Tab Closure During Overlay Display**:
 - Background removes tab from stack via `onRemoved` event
-- Content script does not automatically refresh overlay
-- Stale tab selection will fail gracefully and close overlay
+- If an overlay is open for that window, background sends `TAB_STACK_UPDATED` to that tab
+- Content script re-fetches the stack and re-renders
 
 ## Testing Strategy
 
@@ -683,7 +686,7 @@ async function requestTabStack() {
 **Content Script Tests**:
 - Overlay DOM creation and injection
 - Tab card rendering with various metadata
-- Keyboard event handling (Alt+Y, Shift+Alt+Y, Enter, Escape)
+- Keyboard event handling (Tab/Shift+Tab, ArrowUp/ArrowDown, Enter, Escape)
 - Selection movement with wrapping
 - Message sending to background
 - Overlay cleanup and state reset
@@ -771,16 +774,19 @@ Content scripts are injected into every page at `document_end`. To minimize perf
 **One-Time Requests**:
 ```javascript
 // Sender (content script)
-const windowInfo = await chrome.windows.getCurrent();
 const response = await chrome.runtime.sendMessage({ 
-  type: "GET_TAB_STACK", 
-  windowId: windowInfo.id 
+  type: "GET_TAB_STACK"
 });
 
 // Receiver (background)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_TAB_STACK") {
-    getTabStackWithMetadata(message.windowId).then(sendResponse);
+    const windowId = sender?.tab?.windowId;
+    if (typeof windowId !== 'number') {
+      sendResponse({ type: "TAB_STACK_RESPONSE", tabs: [] });
+      return;
+    }
+    getTabStackWithMetadata(windowId).then(sendResponse);
     return true; // Async response
   }
 });
@@ -813,26 +819,17 @@ To comply with Chrome's Content Security Policy:
 
 Chrome's `commands` API has limitations:
 - Cannot use Alt+Tab (reserved by OS)
-- Cannot detect key hold duration directly
-- Must use `keydown` and `keyup` events in content script for hold detection
+- Does not expose modifier-key state (e.g. Shift) to the service worker
 - Shortcuts are suggestions; users can customize in `chrome://extensions/shortcuts`
 
 ### Favicon Handling
 
-Tab favicons may be:
-- Empty string (no favicon)
-- Data URL (inline image)
-- HTTP/HTTPS URL (external image)
-- Chrome extension URL (for extension pages)
+This extension does not load remote favicons. The overlay always uses a built-in local icon.
 
-**Fallback Strategy**:
+**Icon Strategy**:
 ```javascript
-function renderFavicon(favIconUrl) {
-  if (!favIconUrl) {
-    return '<div class="cts-favicon-placeholder">📄</div>';
-  }
-  return `<img class="cts-favicon" src="${escapeHtml(favIconUrl)}" 
-               onerror="this.style.display=\'none\'" alt="">`;
+function getLocalTabIconUrl() {
+  return chrome.runtime.getURL('icons/tab16.png');
 }
 ```
 

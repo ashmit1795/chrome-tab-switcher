@@ -11,7 +11,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
   - Create manifest.json with Manifest V3 configuration
   - Define permissions: "tabs", "storage", "activeTab"
   - Register background service worker and content script
-  - Define keyboard commands: "open-switcher" (Alt+Y) and "quick-switch" (Alt+W)
+  - Define keyboard commands: "open-switcher" (Alt+X) and "quick-switch" (Alt+W)
   - Create placeholder icon files (16x16, 48x48, 128x128)
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
@@ -49,7 +49,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
 - [ ] 3. Implement quick switch command
   - [ ] 3.1 Implement quick switch handler
     - Create handleQuickSwitch() function
-    - Get current window ID using chrome.windows.getCurrent()
+    - Derive windowId from the tab provided to commands.onCommand (fallback: chrome.windows.getLastFocused())
     - Read second item from current window's tab stack
     - Activate tab using chrome.tabs.update()
     - Handle case when fewer than 2 tabs in window's stack
@@ -81,7 +81,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
   - [ ] 5.2 Implement tab stack metadata enrichment
     - Create getTabStackWithMetadata(windowId) function
     - Query chrome.tabs.query({ windowId }) for tabs in specific window
-    - Map tab IDs to metadata (title, url, favIconUrl)
+    - Map tab IDs to metadata (title, url)
     - Filter out closed tabs from window's stack
     - Extract domain from each tab URL
     - Return enriched tab metadata array
@@ -97,7 +97,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
 - [ ] 6. Implement background message handling
   - [ ] 6.1 Implement message handlers
     - Set up chrome.runtime.onMessage listener
-    - Handle "GET_TAB_STACK" message type with windowId parameter
+    - Handle "GET_TAB_STACK" message type (infer windowId from sender.tab.windowId)
     - Handle "SWITCH_TO_TAB" message type
     - Implement async response pattern for GET_TAB_STACK
     - _Requirements: 7.2, 7.3, 8.1, 8.4, 10.6_
@@ -137,7 +137,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
   - [ ] 8.2 Implement tab card rendering
     - Create renderTabCards() function
     - Generate HTML for each tab card with data-tab-id attribute
-    - Render favicon (with fallback for missing icons)
+    - Render built-in local icon (do not load remote favicons)
     - Render tab title (truncated to 40 characters)
     - Render tab domain
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5_
@@ -192,8 +192,7 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
   
   - [ ] 10.2 Implement tab stack request
     - Create requestTabStack() function
-    - Get current window ID using chrome.windows.getCurrent()
-    - Send "GET_TAB_STACK" message to background with windowId
+    - Send "GET_TAB_STACK" message to background (background infers windowId from sender)
     - Handle response with tab metadata
     - Call injectOverlay() with received tabs
     - Add error handling for message failures
@@ -221,36 +220,28 @@ This implementation plan breaks down the Chrome Tab Switcher extension into disc
   
   - [ ] 11.2 Implement keyboard event handlers
     - Create handleKeyDown() function
-    - Handle Alt+Y for next tab navigation
-    - Handle Shift+Alt+Y for previous tab navigation
+    - Handle Tab or ArrowDown for next tab navigation
+    - Handle Shift+Tab or ArrowUp for previous tab navigation
     - Handle Enter key to switch to selected tab
     - Handle Escape key to close overlay
     - Prevent default behavior for handled keys
-    - Set keyHeldDown flag on navigation
     - _Requirements: 6.1, 6.2, 6.5, 6.6_
   
-  - [ ] 11.3 Implement key release detection
-    - Create handleKeyUp() function
-    - Detect Alt key release
-    - Switch to selected tab on Alt release
-    - _Requirements: 6.7_
-  
   - [ ] 11.4 Register and unregister event listeners
-    - Add keydown and keyup listeners when overlay opens
+    - Add keydown listener when overlay opens
     - Remove listeners when overlay closes
-    - _Requirements: 6.1, 6.2, 6.5, 6.6, 6.7_
+    - _Requirements: 6.1, 6.2, 6.5, 6.6_
   
   - [ ]* 11.5 Write unit tests for keyboard navigation
     - Test moveSelection() with wrapping
     - Test handleKeyDown() for all key combinations
-    - Test handleKeyUp() for Alt release
     - Test event listener registration/cleanup
 
 - [ ] 12. Implement overlay cleanup
   - [ ] 12.1 Implement overlay removal
     - Create closeOverlay() function
     - Remove overlay element from DOM
-    - Reset state variables (isOverlayOpen, selectedIndex, keyHeldDown)
+    - Reset state variables (isOverlayOpen, selectedIndex)
     - Remove keyboard event listeners
     - _Requirements: 7.4_
   
