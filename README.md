@@ -89,6 +89,7 @@ The extension mimics the Windows Alt+Tab experience:
 
 ```
 chrome-tab-switcher/          ← repository root
+├── assets/                   ← Store listing assets (promo marquee, screenshots)
 ├── chrome-tab-switcher/      ← extension package (load this in Chrome)
 │   ├── manifest.json         ← MV3 manifest: permissions, commands, registration
 │   ├── background.js         ← Service worker: tab tracking, commands, messaging
