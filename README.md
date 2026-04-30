@@ -120,18 +120,18 @@ chrome-tab-switcher/          ← repository root
 │  chrome.commands.onCommand                              │
 │       ↓                                                 │
 │  ┌─────────────────────┐    ┌─────────────────────────┐ │
-│  │   background.js     │◄──►│   chrome.storage.session│ │
-│  │   (Service Worker)  │    │   (Tab Stack persistence)│ │
+│  │   background.js     │◄──►│  chrome.storage.session │ │
+│  │   (Service Worker)  │    │ (Tab Stack persistence) │ │
 │  │                     │    └─────────────────────────┘ │
 │  │  • Tab recency      │                                │
-│  │  • Quick switch      │    ┌─────────────────────────┐ │
-│  │  • Message routing   │───►│   content.js            │ │
-│  │  • On-demand inject  │◄───│   (Content Script)      │ │
+│  │  • Quick switch     │    ┌─────────────────────────┐ │
+│  │  • Message routing  │───►│   content.js            │ │
+│  │  • On-demand inject │◄───│   (Content Script)      │ │
 │  └─────────────────────┘    │                         │ │
-│                              │  • Overlay DOM          │ │
-│                              │  • Keyboard handling    │ │
-│                              │  • Alt-release detect   │ │
-│                              └─────────────────────────┘ │
+│                             │  • Overlay DOM          │ │
+│                             │  • Keyboard handling    │ │
+│                             │  • Alt-release detect   │ │
+│                             └─────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
 ```
 
