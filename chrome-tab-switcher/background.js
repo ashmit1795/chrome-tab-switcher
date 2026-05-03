@@ -22,6 +22,10 @@ let overlayHostTabByWindow = new Map();
 // Key used for chrome.storage.session persistence.
 const STORAGE_KEY = 'tabStacksByWindow';
 
+// Tracks whether the stacks have been loaded for this service worker lifetime.
+let _stacksReady = false;
+let _stacksReadyPromise = null;
+
 // ---------------------------------------------------------------------------
 // INITIALIZATION
 // ---------------------------------------------------------------------------
@@ -29,13 +33,14 @@ const STORAGE_KEY = 'tabStacksByWindow';
 /**
  * Restores per-window tab stacks from chrome.storage.session.
  *
- * Called on service worker activation so that tab history survives
- * service worker termination (but not browser restart, since session
- * storage is cleared when the browser closes).
+ * Called at the top level every time the service worker starts, so that tab
+ * history survives service worker termination (but not browser restart,
+ * since session storage is cleared when the browser closes).
  *
  * Satisfies Requirements 2.6, 10.1, 10.2
  */
 async function initializeTabStacks() {
+  if (_stacksReady) return; // Already loaded this lifetime
   try {
     const result = await chrome.storage.session.get(STORAGE_KEY);
     const stored = result[STORAGE_KEY] || {};
@@ -44,31 +49,92 @@ async function initializeTabStacks() {
     tabStacksByWindow = new Map(
       Object.entries(stored).map(([k, v]) => [parseInt(k, 10), v])
     );
+    _stacksReady = true;
     console.log('[TabSwitcher] Tab stacks restored from session storage:', tabStacksByWindow.size, 'window(s)');
+
+    // If restored stacks are empty (first install or browser restart),
+    // seed them from all currently-open tabs.
+    if (tabStacksByWindow.size === 0) {
+      await seedInitialStacks();
+    } else {
+      // Validate restored stacks: remove any tab IDs that no longer exist
+      await validateStacks();
+    }
   } catch (error) {
     console.error('[TabSwitcher] Failed to restore tab stacks:', error);
     tabStacksByWindow = new Map();
+    _stacksReady = true;
+    await seedInitialStacks();
+  }
+}
+
+/**
+ * Validates that all tab IDs in the restored stacks still exist.
+ * Removes stale entries that may have been left over from a previous session.
+ */
+async function validateStacks() {
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const liveIds = new Set(allTabs.map(t => t.id));
+    let changed = false;
+    for (const [windowId, stack] of tabStacksByWindow) {
+      const filtered = stack.filter(id => liveIds.has(id));
+      if (filtered.length !== stack.length) {
+        tabStacksByWindow.set(windowId, filtered);
+        changed = true;
+      }
+      // Remove empty windows
+      if (filtered.length === 0) {
+        tabStacksByWindow.delete(windowId);
+        changed = true;
+      }
+    }
+
+    // Also check if there are windows that have no stack at all
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindows) {
+      if (win.type !== 'normal') continue;
+      const stack = tabStacksByWindow.get(win.id) || [];
+      const liveTabs = win.tabs.filter(t => t.id >= 0);
+      const stackIds = new Set(stack);
+      // Add any tabs that exist in the window but aren't in the stack
+      for (const tab of liveTabs) {
+        if (!stackIds.has(tab.id)) {
+          stack.push(tab.id);
+          changed = true;
+        }
+      }
+      if (stack.length > 0) {
+        tabStacksByWindow.set(win.id, stack.slice(0, 20));
+      }
+    }
+
+    if (changed) {
+      await persistTabStacks();
+      console.log('[TabSwitcher] Stacks validated and cleaned up.');
+    }
+  } catch (error) {
+    console.error('[TabSwitcher] Failed to validate stacks:', error);
   }
 }
 
 /**
  * Seeds the tab stacks from all currently open windows and their tabs.
- * Called on first install so that quick-switch works immediately.
+ * Called when session storage is empty (first install or browser restart).
  */
 async function seedInitialStacks() {
   try {
     const windows = await chrome.windows.getAll({ populate: true });
     for (const win of windows) {
-      if (!tabStacksByWindow.has(win.id) || (tabStacksByWindow.get(win.id) || []).length === 0) {
-        // Find the active tab to put first
-        const activeTab = win.tabs.find(t => t.active);
-        const otherTabs = win.tabs.filter(t => !t.active && t.id >= 0);
-        const stack = [];
-        if (activeTab && activeTab.id >= 0) stack.push(activeTab.id);
-        for (const t of otherTabs) stack.push(t.id);
-        if (stack.length > 0) {
-          tabStacksByWindow.set(win.id, stack.slice(0, 20));
-        }
+      if (win.type !== 'normal') continue;
+      // Find the active tab to put first
+      const activeTab = win.tabs.find(t => t.active);
+      const otherTabs = win.tabs.filter(t => !t.active && t.id >= 0);
+      const stack = [];
+      if (activeTab && activeTab.id >= 0) stack.push(activeTab.id);
+      for (const t of otherTabs) stack.push(t.id);
+      if (stack.length > 0) {
+        tabStacksByWindow.set(win.id, stack.slice(0, 20));
       }
     }
     await persistTabStacks();
@@ -76,6 +142,15 @@ async function seedInitialStacks() {
   } catch (error) {
     console.error('[TabSwitcher] Failed to seed initial stacks:', error);
   }
+}
+
+/**
+ * Ensures stacks are loaded before any operation that depends on them.
+ * Returns immediately if already loaded; otherwise waits for initialization.
+ */
+function ensureStacksReady() {
+  if (_stacksReady) return Promise.resolve();
+  return _stacksReadyPromise;
 }
 
 /**
@@ -104,10 +179,18 @@ async function persistTabStacks() {
 // SERVICE WORKER ACTIVATION
 // ---------------------------------------------------------------------------
 
-// Restore state when the extension is first installed or updated.
+// ▶ CRITICAL: Run initializeTabStacks() at the TOP LEVEL so it executes
+//   every time the service worker starts (including after sleep/termination).
+//   In MV3, the 'activate' ServiceWorker lifecycle event does NOT fire on
+//   wake-up. Only top-level code and event listeners run on every start.
+_stacksReadyPromise = initializeTabStacks();
+
+// On install/update, also inject content scripts into existing tabs.
 chrome.runtime.onInstalled.addListener(async () => {
-  console.log('[TabSwitcher] Extension installed/updated — initializing tab stacks.');
-  await initializeTabStacks();
+  console.log('[TabSwitcher] Extension installed/updated.');
+  await ensureStacksReady();
+
+  // Re-seed stacks to capture any tabs that were open before the extension
   await seedInitialStacks();
 
   // Inject content script into all existing http/https tabs
@@ -123,13 +206,6 @@ chrome.runtime.onInstalled.addListener(async () => {
       // Silently skip tabs that reject injection (e.g. Chrome Web Store)
     }
   }
-});
-
-// Restore state when the service worker wakes up after being terminated.
-// 'activate' fires after 'install' completes and the worker takes control.
-self.addEventListener('activate', () => {
-  console.log('[TabSwitcher] Service worker activated — initializing tab stacks.');
-  initializeTabStacks();
 });
 
 // ---------------------------------------------------------------------------
@@ -163,8 +239,31 @@ function updateTabStack(tabId, windowId) {
  * The event info object contains both tabId and windowId directly,
  * so no additional chrome.tabs.get() call is required. (Req 10.6)
  */
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  await ensureStacksReady();
   updateTabStack(tabId, windowId);
+});
+
+// ---------------------------------------------------------------------------
+// TAB CREATION — capture new tabs immediately
+// ---------------------------------------------------------------------------
+
+/**
+ * Adds newly created tabs to the back of their window's MRU stack
+ * so they appear in the switcher even before they're activated.
+ */
+chrome.tabs.onCreated.addListener(async (tab) => {
+  await ensureStacksReady();
+  if (tab.id < 0) return;
+  const windowId = tab.windowId;
+  let stack = tabStacksByWindow.get(windowId) || [];
+  // Only add if not already in the stack
+  if (!stack.includes(tab.id)) {
+    stack.push(tab.id); // Add to back (not MRU-first since it wasn't activated yet)
+    if (stack.length > 20) stack = stack.slice(0, 20);
+    tabStacksByWindow.set(windowId, stack);
+    persistTabStacks();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -221,14 +320,16 @@ function removeClosedWindow(windowId) {
  * removeInfo.windowId is provided directly by the Chrome API, so no
  * additional chrome.tabs.get() call is required. (Req 10.6)
  */
-chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+  await ensureStacksReady();
   removeClosedTab(tabId, removeInfo.windowId);
 });
 
 /**
  * Listens for window removal events and cleans up the entire window stack.
  */
-chrome.windows.onRemoved.addListener((windowId) => {
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  await ensureStacksReady();
   removeClosedWindow(windowId);
 });
 
@@ -251,6 +352,7 @@ chrome.windows.onRemoved.addListener((windowId) => {
  * Satisfies Requirements 3.1, 3.2, 3.3, 3.4, 10.6
  */
 async function handleQuickSwitch(commandTab) {
+  await ensureStacksReady();
   try {
     // Resolve the window ID from the command tab or fall back to the last focused window.
     let windowId;
@@ -296,6 +398,7 @@ async function handleQuickSwitch(commandTab) {
  * Satisfies Requirements 7.2, 7.3, 10.5
  */
 async function handleOpenSwitcher(commandTab) {
+  await ensureStacksReady();
   try {
     // Resolve the target tab — always fall back to query if commandTab is
     // missing, has a non-numeric id, or has a negative id (TAB_ID_NONE = -1).
@@ -396,9 +499,11 @@ function extractDomain(url) {
  *  3. Filter the in-memory stack to only IDs that still exist (removes
  *     closed tabs that weren't caught by onRemoved, e.g. after a service
  *     worker restart).
- *  4. Map each surviving ID to a metadata object: { id, title, url, domain }.
- *  5. Write the cleaned-up ID list back to the in-memory stack and persist.
- *  6. Return the enriched array.
+ *  4. For any tabs in the window that aren't in the stack, append them
+ *     (handles new tabs created while service worker was asleep).
+ *  5. Map each surviving ID to a metadata object: { id, title, url, domain }.
+ *  6. Write the cleaned-up ID list back to the in-memory stack and persist.
+ *  7. Return the enriched array.
  *
  * @param {number} windowId - The Chrome window ID whose stack to enrich.
  * @returns {Promise<Array<{id: number, title: string, url: string, domain: string}>>}
@@ -409,21 +514,32 @@ async function getTabStackWithMetadata(windowId) {
   const tabs = await chrome.tabs.query({ windowId });
   const tabMap = new Map(tabs.map(t => [t.id, t]));
 
-  const stack = tabStacksByWindow.get(windowId) || [];
+  let stack = tabStacksByWindow.get(windowId) || [];
 
-  // Filter out closed tabs and enrich surviving entries with metadata.
-  const enrichedStack = stack
-    .filter(id => tabMap.has(id))
-    .map(id => {
-      const tab = tabMap.get(id);
-      return {
-        id: tab.id,
-        title: tab.title || 'Untitled',
-        url: tab.url || '',
-        domain: extractDomain(tab.url || ''),
-        favIconUrl: tab.favIconUrl || ''
-      };
-    });
+  // Filter out closed tabs
+  stack = stack.filter(id => tabMap.has(id));
+
+  // ▶ KEY FIX: Add any tabs that exist in the window but aren't in the stack.
+  // This catches tabs that were created/opened while the service worker was
+  // asleep, or tabs that existed before the extension was installed.
+  const stackSet = new Set(stack);
+  for (const tab of tabs) {
+    if (tab.id >= 0 && !stackSet.has(tab.id)) {
+      stack.push(tab.id);
+    }
+  }
+
+  // Enrich with metadata
+  const enrichedStack = stack.map(id => {
+    const tab = tabMap.get(id);
+    return {
+      id: tab.id,
+      title: tab.title || 'Untitled',
+      url: tab.url || '',
+      domain: extractDomain(tab.url || ''),
+      favIconUrl: tab.favIconUrl || ''
+    };
+  });
 
   // Update the in-memory stack to remove any stale tab IDs.
   tabStacksByWindow.set(windowId, enrichedStack.map(t => t.id));
@@ -490,8 +606,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ type: 'TAB_STACK_RESPONSE', tabs: [] });
       return; // Synchronous early return — no async work needed.
     }
-    getTabStackWithMetadata(windowId).then(tabs => {
+    // Wait for stacks to be ready, then fetch metadata
+    ensureStacksReady().then(() => {
+      return getTabStackWithMetadata(windowId);
+    }).then(tabs => {
       sendResponse({ type: 'TAB_STACK_RESPONSE', tabs });
+    }).catch(err => {
+      console.error('[TabSwitcher] GET_TAB_STACK failed:', err);
+      sendResponse({ type: 'TAB_STACK_RESPONSE', tabs: [] });
     });
     return true; // Keep the message channel open for the async response.
   }
